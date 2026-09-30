@@ -1,0 +1,2 @@
+include src/dfsph_flow/_core.pyx
+include README.md LICENSE
