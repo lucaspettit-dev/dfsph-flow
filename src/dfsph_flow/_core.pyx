@@ -322,20 +322,30 @@ cdef class NeighborSearch:
             if cnt <= self.leaf_cap or (cx1 - cx0 == 1 and cy1 - cy0 == 1):
                 leaf_ids.append(nid)
                 continue
-            # split the (power-of-two aligned) box
+                        # Split the (power-of-two aligned) box. A 4-way split yields
+            # Morton-contiguous child cell runs ONLY when the node is square;
+            # for non-square nodes the quadrants interleave in z-order, so the
+            # single-scan run detection below would record overlapping ranges,
+            # making the neighbor count pass (overwrite) and fill pass
+            # (accumulate) disagree -> buffer overflow. Hence: 4-way split
+            # for square nodes, otherwise split the longer axis in two
+            # (bintree). Both cases keep every child's morton range contiguous
+            # because they fix the highest varying Morton bit(s).
             child_boxes = []
-            if cx1 - cx0 > 1 and cy1 - cy0 > 1:
+            sx = cx1 - cx0
+            sy = cy1 - cy0
+            if sx > 1 and sy > 1 and sx == sy:
                 midx = (cx0 + cx1) // 2
                 midy = (cy0 + cy1) // 2
                 child_boxes = [(cx0, cy0, midx, midy), (midx, cy0, cx1, midy),
                                (cx0, midy, midx, cy1), (midx, midy, cx1, cy1)]
-            elif cx1 - cx0 > 1:
+            elif sx > 1 and (sy <= 1 or sx >= sy):
                 midx = (cx0 + cx1) // 2
                 child_boxes = [(cx0, cy0, midx, cy1), (midx, cy0, cx1, cy1)]
             else:
                 midy = (cy0 + cy1) // 2
                 child_boxes = [(cx0, cy0, cx1, midy), (cx0, midy, cx1, cy1)]
-            nchild = len(child_boxes)
+                nchild = len(child_boxes)
             # one scan over the morton range: children are contiguous runs
             sub_cb = [-1] * nchild
             sub_ce = [-1] * nchild
