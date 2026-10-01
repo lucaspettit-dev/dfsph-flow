@@ -536,6 +536,8 @@ cdef class DFSPHSolver:
     cdef double tol_dens, tol_div
     cdef int max_iter, leaf_cap
     cdef list _pending
+    cdef list _inflows
+    cdef list _outflows
     cdef bint _finalized
     cdef int n, n_fluid
     cdef object _x, _y, _vx, _vy, _rho, _p, _alpha, _drhodt
@@ -562,6 +564,8 @@ cdef class DFSPHSolver:
         self.max_iter = max_iterations
         self.leaf_cap = leaf_cap
         self._pending = []
+        self._inflows = []
+        self._outflows = []
         self._finalized = False
         self.n = 0
         self.n_fluid = 0
@@ -577,6 +581,15 @@ cdef class DFSPHSolver:
 
     def add_boundary_block(self, double xmin, double ymin, double xmax, double ymax):
         self._pending.append(("block", xmin, ymin, xmax, ymax, 0.0, 0.0))
+
+    def add_inflow_box(self, double xmin, double ymin, double xmax, double ymax,
+                       double vx, double vy):
+        """Define a region that spawns fluid particles at velocity (vx, vy)."""
+        self._inflows.append((xmin, ymin, xmax, ymax, vx, vy))
+
+    def add_outflow_box(self, double xmin, double ymin, double xmax, double ymax):
+        """Define a region that deletes fluid particles."""
+        self._outflows.append((xmin, ymin, xmax, ymax))
 
     def _finalize(self):
         xs, ys, vxs, vys, bnds = [], [], [], [], []
@@ -658,6 +671,8 @@ cdef class DFSPHSolver:
         self._compute_density_alpha()
         self._solve_constant_density(dt)
         self._velocity_fixup(dt)
+        self._apply_outflow()
+        self._apply_inflow()
         return dt
 
     cdef void _advect_and_save(self, double dt):
@@ -682,6 +697,98 @@ cdef class DFSPHSolver:
                     continue
                 vx[i] += (x[i] - xadv[i]) / dt
                 vy[i] += (y[i] - yadv[i]) / dt
+
+    def _select(self, keep):
+        """Keep only the particles selected by the boolean mask ``keep``."""
+        self._x = np.ascontiguousarray(self._x[keep])
+        self._y = np.ascontiguousarray(self._y[keep])
+        self._vx = np.ascontiguousarray(self._vx[keep])
+        self._vy = np.ascontiguousarray(self._vy[keep])
+        self._rho = np.ascontiguousarray(self._rho[keep])
+        self._p = np.ascontiguousarray(self._p[keep])
+        self._alpha = np.ascontiguousarray(self._alpha[keep])
+        self._drhodt = np.ascontiguousarray(self._drhodt[keep])
+        self._xadv = np.ascontiguousarray(self._xadv[keep])
+        self._yadv = np.ascontiguousarray(self._yadv[keep])
+        self._isbnd = np.ascontiguousarray(self._isbnd[keep])
+        self.n = len(self._x)
+        self.n_fluid = int(self.n - self._isbnd.sum())
+
+    def _apply_outflow(self):
+        """Delete fluid particles that lie inside an outflow box."""
+        if not self._outflows:
+            return
+        cdef double[::1] x = self._x, y = self._y
+        cdef unsigned char[::1] isbnd = self._isbnd
+        cdef int i
+        cdef double xmin, ymin, xmax, ymax
+        keep = np.ones(self.n, dtype=bool)
+        for xmin, ymin, xmax, ymax in self._outflows:
+            for i in range(self.n):
+                if isbnd[i] == 0 and xmin <= x[i] < xmax and ymin <= y[i] < ymax:
+                    keep[i] = False
+        self._select(keep)
+
+    def _apply_inflow(self):
+        """Spawn fluid particles on empty grid cells inside inflow boxes.
+
+        New particles get the box velocity, rest density, zero pressure
+        and a small positional jitter (avoids quadtree degeneracy).
+        """
+        if not self._inflows:
+            return
+        cdef double d = self.dx
+        cdef double tol2 = (0.6 * d) * (0.6 * d)
+        cdef double xmin, ymin, xmax, ymax, vx, vy
+        new_x, new_y, new_vx, new_vy = [], [], [], []
+        for xmin, ymin, xmax, ymax, vx, vy in self._inflows:
+            px = np.arange(xmin + 0.5 * d, xmax, d)
+            py = np.arange(ymin + 0.5 * d, ymax, d)
+            if len(px) == 0 or len(py) == 0:
+                continue
+            # particles near the box that could block spawning
+            m = (self._x >= xmin - d) & (self._x < xmax + d) & \
+                (self._y >= ymin - d) & (self._y < ymax + d)
+            bx = self._x[m]
+            by = self._y[m]
+            for gy_ in py:
+                for gx_ in px:
+                    if len(bx):
+                        dd = (bx - gx_) ** 2 + (by - gy_) ** 2
+                        if dd.min() <= tol2:
+                            continue
+                    # jitter to avoid quadtree degeneracy on a perfect grid
+                    jx = (np.random.rand() - 0.5) * 0.2 * d
+                    jy = (np.random.rand() - 0.5) * 0.2 * d
+                    new_x.append(gx_ + jx)
+                    new_y.append(gy_ + jy)
+                    new_vx.append(vx)
+                    new_vy.append(vy)
+        if not new_x:
+            return
+        cdef int n_new = len(new_x)
+        ax = np.ascontiguousarray(np.array(new_x, dtype=np.float64))
+        ay = np.ascontiguousarray(np.array(new_y, dtype=np.float64))
+        avx = np.ascontiguousarray(np.array(new_vx, dtype=np.float64))
+        avy = np.ascontiguousarray(np.array(new_vy, dtype=np.float64))
+        self._x = np.ascontiguousarray(np.concatenate([self._x, ax]))
+        self._y = np.ascontiguousarray(np.concatenate([self._y, ay]))
+        self._vx = np.ascontiguousarray(np.concatenate([self._vx, avx]))
+        self._vy = np.ascontiguousarray(np.concatenate([self._vy, avy]))
+        self._rho = np.ascontiguousarray(
+            np.concatenate([self._rho, np.full(n_new, self.rho0)]))
+        self._p = np.ascontiguousarray(
+            np.concatenate([self._p, np.zeros(n_new)]))
+        self._alpha = np.ascontiguousarray(
+            np.concatenate([self._alpha, np.ones(n_new)]))
+        self._drhodt = np.ascontiguousarray(
+            np.concatenate([self._drhodt, np.zeros(n_new)]))
+        self._xadv = np.ascontiguousarray(np.concatenate([self._xadv, ax]))
+        self._yadv = np.ascontiguousarray(np.concatenate([self._yadv, ay]))
+        self._isbnd = np.ascontiguousarray(
+            np.concatenate([self._isbnd, np.zeros(n_new, dtype=np.uint8)]))
+        self.n = len(self._x)
+        self.n_fluid = int(self.n - self._isbnd.sum())
 
     def debug_half_step(self):
         """Run through the divergence-free solve and return internal arrays."""
@@ -737,6 +844,9 @@ cdef class DFSPHSolver:
         self._vy = np.ascontiguousarray(self._vy[perm])
         self._isbnd = np.ascontiguousarray(self._isbnd[perm])
         self._rho = np.ascontiguousarray(self._rho[perm])
+        self._p = np.ascontiguousarray(self._p[perm])
+        self._alpha = np.ascontiguousarray(self._alpha[perm])
+        self._drhodt = np.ascontiguousarray(self._drhodt[perm])
         # advected positions (if they exist yet) must follow the same order
         if self._xadv is not None:
             self._xadv = np.ascontiguousarray(self._xadv[perm])

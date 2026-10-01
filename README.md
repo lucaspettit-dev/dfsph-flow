@@ -47,6 +47,21 @@ velocities = sim.velocities    # (N, 2) array
 img = sim.render(width=800, height=400)  # RGB array, direction/speed colormap
 ```
 
+### Inflow / Outflow (open boundaries)
+
+Define regions that continuously spawn fluid particles at a given velocity (inflow) or delete fluid particles that enter them (outflow). Inflow boxes only fill grid cells that are currently empty, so they will not over-pack an already populated region; spawned particles get a small positional jitter to avoid quadtree degeneracy. Outflow boxes remove fluid particles only — never boundary particles.
+
+```python
+# wind-tunnel test: uniform flow enters from the left, exits on the right
+sim = DFSPHFlow(dx=0.05, gravity=(0, 0), xsph_epsilon=0.1, max_dt=0.002)
+sim.add_boundary_block(0.4, 0.35, 0.5, 0.65)   # obstacle in the stream
+sim.add_inflow_box(0.0, 0.0, 0.1, 1.0, velocity=(2.0, 0.0))
+sim.add_outflow_box(0.9, 0.0, 1.0, 1.0)
+
+for _ in range(500):
+    dt = sim.step()
+```
+
 ## Parameters
 
 - `dx`: particle spacing (m)

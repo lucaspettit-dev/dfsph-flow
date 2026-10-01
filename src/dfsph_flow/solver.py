@@ -87,6 +87,14 @@ class DFSPHFlow:
         """Add a filled rectangular obstacle (sampled boundary particles)."""
         self._solver.add_boundary_block(xmin, ymin, xmax, ymax)
 
+    def add_inflow_box(self, xmin, ymin, xmax, ymax, velocity=(0.0, 0.0)):
+        """Define a region that spawns fluid particles at the given velocity."""
+        self._solver.add_inflow_box(xmin, ymin, xmax, ymax, velocity[0], velocity[1])
+
+    def add_outflow_box(self, xmin, ymin, xmax, ymax):
+        """Define a region that deletes fluid particles."""
+        self._solver.add_outflow_box(xmin, ymin, xmax, ymax)
+
     # -- stepping --------------------------------------------------------
     def step(self):
         """Advance one adaptive time step. Returns the dt used."""
